@@ -7,6 +7,7 @@ import {Panel} from "./components/panel.ts";
 
 import {Repeater} from "./components/repeater.ts";
 import {TestDestroy} from "./components/test-listener.ts";
+import {Todos} from "./components/todo/todos.ts";
 
 export const App = component(() => {
     const [value, setValue] = useValue<string | number>(0);
@@ -40,12 +41,14 @@ export const App = component(() => {
             <${MyInput}></${MyInput}>
             
             <${Panel}>
-                <${Counter}></${Counter}>
+                <!--<${Counter}></${Counter}>-->
+                
+                <${Todos}></${Todos}>
             </${Panel}>
             
 <!--            <${TestDestroy}></${TestDestroy}>-->
             
-            <${Repeater}></${Repeater}>
+<!--            <${Repeater}></${Repeater}>-->
         </div>
     `
 });

@@ -1,5 +1,6 @@
 import {allEventListeners} from "./event-listeners.ts";
 import styles from "./framework.css";
+import {booleanAttributes} from "./boolean-attibutes.ts";
 
 // Add styles to the head of the document.
 const style = document.createElement('style');
@@ -27,13 +28,6 @@ class Rendered {
         }
 
         this.teardowns.get(componentId)!.set(name, fn);
-    }
-
-    getTeardowns(componentId: string) {
-        if (!this.teardowns.has(componentId)) {
-            this.teardowns.set(componentId, new Map());
-        }
-        return this.teardowns.get(componentId)!;
     }
 
     getTeardown(componentId: string, name: string) {
@@ -238,6 +232,10 @@ export class Framework {
         }
     };
 
+    static getId() {
+        return getId();
+    }
+
     static addComponent(name: string, component: Function) {
         // Let's determine how the CamelCase name should be converted to kebab-case.
         // For example, 'Counter' should be converted to 'counter'.
@@ -274,7 +272,7 @@ export class Framework {
     static render(selector: string | Element, component: Function, context?: Context) {
         const root = typeof selector === 'string' ? document.querySelector(selector) : selector;
 
-        const componentId = getId();
+        const componentId = context?.componentId || getId();
 
         if (root) {
             Framework.__currentContext = context || Framework.__store.getRenderContext(componentId);
@@ -336,6 +334,16 @@ export class Framework {
                     for (let i = 0; i < attributes.length; i++) {
                         const attribute = attributes[i];
                         const value = attribute.value;
+
+                        if (booleanAttributes.has(attribute.name)) {
+                            const isTrue = value === 'true';
+
+                            if (isTrue) {
+                                el.setAttribute(attribute.name, '');
+                            } else {
+                                el.removeAttribute(attribute.name);
+                            }
+                        }
 
                         if (value && value.startsWith('{') && value.endsWith('}')) {
                             const variableName = value.substring(1, value.length - 1);
@@ -435,7 +443,7 @@ export class Framework {
     }
 }
 
-export function useListener(fn: EventListener) {
+export function useListener(fn: any) { // TODO: Fix any
     const name = fn.name || getSafeSymbolName('fn');
 
     fn.toString = () => {
@@ -592,7 +600,6 @@ function renderDummy(html: string, context: Context): Element {
 function derender(elements: Element) {
     const components = elements.querySelectorAll('[component-id]');
     components.forEach(component => {
-        console.log('Destroying component', component.getAttribute('component-id')!);
         Framework.__store.deleteRenderContext(component.getAttribute('component-id')!);
     });
 }
@@ -602,19 +609,35 @@ export function list<T>(items: ValueGetter<T[]>, fn: (item: T) => string) {
     const listSlot = `<list-slot name="${listSlotName}"></list-slot>`;
 
     const componentId = Framework.__currentContext.componentId;
+    const listenersBeforeRender = Object.keys(Framework.__currentContext.listeners);
+    let lastRenderedListeners: string[] = [];
 
     items.__subscribe((items) => {
         const slot = document.querySelector(`[name="${listSlotName}"]`);
         if (slot) {
+            const savedContext = Framework.__currentContext;
             const context = Framework.__store.getRenderContext(componentId);
-
-            const rerendered = items.map(fn).join('');
-
-            const dummy = renderDummy(rerendered, context);
+            Framework.__currentContext = context;
 
             const parent = slot.parentElement!;
+            derender(parent); // Derender all the components that were inside the list
 
-            derender(parent);
+            // Remove all listeners that were added after the last render.
+            lastRenderedListeners.forEach(listener => {
+                delete context.listeners[listener];
+            });
+
+            const listenersBeforeRender = Object.keys(Framework.__currentContext.listeners);
+
+            const rerendered = items.map(fn).join(''); // Construct the list html
+
+            const listenersAfterRender = Object.keys(Framework.__currentContext.listeners);
+            lastRenderedListeners = listenersAfterRender.filter(listener => !listenersBeforeRender.includes(listener));
+
+            Framework.__currentContext = savedContext;
+
+            const dummy = renderDummy(rerendered, context); // Render the list
+
             parent.innerHTML = '';
 
             parent.appendChild(slot);
@@ -624,5 +647,48 @@ export function list<T>(items: ValueGetter<T[]>, fn: (item: T) => string) {
         }
     });
 
-    return listSlot + items().map(fn).join('');
+    const rendered = listSlot + items().map(fn).join('');
+    const listenersAfterRender = Object.keys(Framework.__currentContext.listeners);
+    lastRenderedListeners = listenersAfterRender.filter(listener => !listenersBeforeRender.includes(listener));
+
+    console.log('listeners', listenersBeforeRender, listenersAfterRender, lastRenderedListeners);
+
+    return rendered;
+}
+
+export class StoreSubject<T> {
+    currentValue: T;
+    subscribers: ((value: T) => void)[] = [];
+
+    constructor(initial: T) {
+        this.currentValue = initial;
+    }
+
+    public next(value: T) {
+        this.currentValue = value;
+        this.subscribers.forEach(subscriber => subscriber(value));
+    }
+
+    public getValue(): T {
+        return this.currentValue;
+    }
+
+    public subscribe(next: (value: T) => void) {
+        this.subscribers.push(next);
+        next(this.currentValue);
+        return () => {
+            this.subscribers = this.subscribers.filter(subscriber => subscriber !== next);
+        };
+    }
+}
+
+export function useStoreSubscribe<T>(storeSubject: StoreSubject<T>) {
+    const [state, setState] = useValue(storeSubject.getValue());
+
+    useEffect(() => {
+        const unsubscribe = storeSubject.subscribe(setState);
+        return () => unsubscribe();
+    }, []);
+
+    return state;
 }
