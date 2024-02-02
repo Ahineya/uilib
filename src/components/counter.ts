@@ -1,9 +1,9 @@
 import {component, useListener, useValue} from "../framework/framework.ts";
 
-export const Counter = component("Counter", function Counter() {
-    const [, setCount] = useValue<number>('count', 0);
+export const Counter = component(() => {
+    const [count, setCount] = useValue<number>(0);
 
-    useListener(
+    const increment = useListener(
         function increment() {
             setCount(oldCount => oldCount + 1);
         }
@@ -11,8 +11,8 @@ export const Counter = component("Counter", function Counter() {
 
     return `
         <div class="counter">
-            <h1>{count}</h1>
-            <button onclick="increment">Increment</button>
+            <h1>{${count}}</h1>
+            <button onclick="${increment}">Increment</button>
         </div>
     `
 });

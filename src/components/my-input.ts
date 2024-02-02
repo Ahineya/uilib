@@ -1,21 +1,21 @@
 import {component, useDerivedValue, useEffect, useListener, useValue} from "../framework/framework.ts";
 
-export const MyInput = component("My-Input", function MyInput() {
-    const [getValue, setValue] = useValue('value', '');
+export const MyInput = component(() => {
+    const [value, setValue] = useValue('');
 
-    useDerivedValue('derivedValue', () => `cl-${getValue().toLowerCase()}`, ['value']);
+    const derivedValue = useDerivedValue(() => `cl-${value().toLowerCase()}`, [value]);
 
     useEffect(() => {
-        console.log('Effect', getValue())
-    }, ['value']);
+        console.log('Effect', value())
+    }, [value]);
 
-    useListener(
-        function change(e: Event) {
+    const change = useListener(
+        (e: Event) => {
             setValue((e.target as HTMLInputElement).value);
         }
     );
 
     return `
-        <input class="{derivedValue}" value="{value}" oninput="change">
+        <input class="{${derivedValue}}" value="{${value}}" oninput="${change}">
     `
 });

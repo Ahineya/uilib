@@ -1,4 +1,11 @@
 import {allEventListeners} from "./event-listeners.ts";
+import styles from "./framework.css";
+
+// Add styles to the head of the document.
+const style = document.createElement('style');
+style.innerHTML = styles;
+document.head.appendChild(style);
+
 
 class Rendered {
     private renderContexts: Map<string, Context> = new Map();
@@ -12,10 +19,48 @@ class Rendered {
         listeners: Set<Function>
     }> = new Map();
 
-    getRenderContext(componentId: string, component: any) {
+    private teardowns: Map<string, Map<string, Function>> = new Map();
+
+    setTeardown(componentId: string, name: string, fn: Function) {
+        if (!this.teardowns.has(componentId)) {
+            this.teardowns.set(componentId, new Map());
+        }
+
+        this.teardowns.get(componentId)!.set(name, fn);
+    }
+
+    getTeardowns(componentId: string) {
+        if (!this.teardowns.has(componentId)) {
+            this.teardowns.set(componentId, new Map());
+        }
+        return this.teardowns.get(componentId)!;
+    }
+
+    getTeardown(componentId: string, name: string) {
+        const teardowns = this.teardowns.get(componentId);
+        if (!teardowns) {
+            console.warn(`Destroy: Component ${componentId} doesn't have any teardowns`);
+            return;
+        }
+
+        return teardowns.get(name);
+    }
+
+    deleteTeardowns(componentId: string) {
+        const teardowns = this.teardowns.get(componentId);
+        if (!teardowns) {
+            console.warn(`Destroy: Component ${componentId} doesn't have any teardowns`);
+            return;
+        }
+
+        teardowns.forEach(fn => fn());
+
+        this.teardowns.delete(componentId);
+    }
+
+    getRenderContext(componentId: string) {
         if (!this.renderContexts.has(componentId)) {
             this.renderContexts.set(componentId, {
-                component,
                 componentId,
                 listeners: {},
                 variables: new Set(),
@@ -27,6 +72,27 @@ class Rendered {
             });
         }
         return this.renderContexts.get(componentId)!;
+    }
+
+    deleteRenderContext(componentId: string) {
+        this.deleteTeardowns(componentId);
+
+        const variables = this.stateVariables.get(componentId);
+        if (!variables) {
+            console.warn(`Destroy: Component ${componentId} doesn't have any variables`);
+            return;
+        }
+
+        variables.forEach((value, key) => {
+            value.listeners.forEach(listener => {
+                variables.get(key)!.listeners.delete(listener);
+            });
+
+            variables.delete(key);
+        });
+
+        this.stateVariables.delete(componentId);
+        this.renderContexts.delete(componentId);
     }
 
     getStateVariables(componentId: string) {
@@ -48,7 +114,7 @@ class Rendered {
     }
 
     getVariable(componentId: string, name: string) {
-        const componentName = this.renderContexts.get(componentId)?.component?.name || componentId;
+        const componentName = componentId;
         const value = this.getStateVariables(componentId).get(name);
 
         if (value) {
@@ -106,7 +172,6 @@ class Rendered {
 }
 
 type Context = {
-    component: any,
     componentId: string,
 
     listeners: Record<string, EventListener>,
@@ -138,9 +203,21 @@ class Random {
         this.used.add(id);
         return id;
     }
+
+    public getSafeSymbolName = (prefix?: string) => {
+        let id = Math.random().toString(36).slice(2, 9);
+        while (this.used.has(id)) {
+            id = Math.random().toString(36).slice(2, 9);
+        }
+
+        id = `${prefix || ''}${id}`;
+
+        this.used.add(id);
+        return id;
+    }
 }
 
-const {getId} = new Random();
+const {getId, getSafeSymbolName} = new Random();
 
 export class Framework {
     static __components: Map<string, Function> = new Map();
@@ -148,7 +225,6 @@ export class Framework {
     static __store: Rendered = new Rendered();
 
     static __currentContext: Context = {
-        component: null,
         componentId: '',
         listeners: {},
         variables: new Set(),
@@ -195,13 +271,13 @@ export class Framework {
         return Framework.__components;
     }
 
-    static render(selector: string | Element, component: Function) {
+    static render(selector: string | Element, component: Function, context?: Context) {
         const root = typeof selector === 'string' ? document.querySelector(selector) : selector;
 
-        const componentId = component.name + '-' + Math.random().toString(36).substr(2, 9);
+        const componentId = getId();
 
         if (root) {
-            Framework.__currentContext = Framework.__store.getRenderContext(componentId, component);
+            Framework.__currentContext = context || Framework.__store.getRenderContext(componentId);
             Framework.__currentContext.setVariable = (name, value) => Framework.__store.setVariable(componentId, name, value);
             Framework.__currentContext.getVariable = (name) => Framework.__store.getVariable(componentId, name);
 
@@ -349,6 +425,8 @@ export class Framework {
                 }
             });
 
+            element.setAttribute('component-id', componentId);
+
             root.parentNode?.insertBefore(element, root);
             root.parentNode?.removeChild(root);
         } else {
@@ -358,11 +436,22 @@ export class Framework {
 }
 
 export function useListener(fn: EventListener) {
-    const fnName = fn.name;
-    Framework.__currentContext.listeners[fnName] = fn;
+    const name = fn.name || getSafeSymbolName('fn');
+
+    fn.toString = () => {
+        return name;
+    }
+
+    Framework.__currentContext.listeners[name] = fn;
+
+    return name;
 }
 
-export function useValue<T>(name: string, initialValue: T): [() => T, (setter: T | ((oldValue: T) => T)) => void] {
+type ValueGetter<T> = (() => T) & { __subscribe: (fn: (value: T) => void) => void };
+
+export function useValue<T>(initialValue: T): [ValueGetter<T>, (setter: T | ((oldValue: T) => T)) => void] {
+    const name = getSafeSymbolName('state');
+
     if (!Framework.__currentContext.variables.has(name)) {
         Framework.__currentContext.variables.add(name);
         Framework.__currentContext.setVariable(name, initialValue);
@@ -370,8 +459,14 @@ export function useValue<T>(name: string, initialValue: T): [() => T, (setter: T
 
     const componentId = Framework.__currentContext.componentId;
 
+    const valueGetter: ValueGetter<T> = () => Framework.__store.getVariable(componentId, name).value;
+    valueGetter.toString = () => name;
+    valueGetter.__subscribe = (fn: (value: T) => void) => {
+        Framework.__store.getVariable(componentId, name).listeners.add(() => fn(valueGetter()));
+    }
+
     return [
-        () => Framework.__store.getVariable(componentId, name).value,
+        valueGetter,
         (setter: T | ((oldValue: T) => T)) => {
 
             let setterFn: (oldValue: T) => T;
@@ -389,8 +484,10 @@ export function useValue<T>(name: string, initialValue: T): [() => T, (setter: T
     ]
 }
 
-export function useDerivedValue<T>(name: string, fn: () => T, dependencies: string[]) {
+export function useDerivedValue<T>(fn: () => T, dependencies: ValueGetter<string>[]) {
     const componentId = Framework.__currentContext.componentId;
+
+    const name = getSafeSymbolName('derived');
 
     if (!Framework.__currentContext.variables.has(name)) {
         Framework.__currentContext.variables.add(name);
@@ -398,20 +495,46 @@ export function useDerivedValue<T>(name: string, fn: () => T, dependencies: stri
     }
 
     dependencies.forEach(dependency => {
-        Framework.__store.getVariable(componentId, dependency).listeners.add(() => {
+        Framework.__store.getVariable(componentId, dependency.toString()).listeners.add(() => {
             Framework.__store.setVariable(componentId, name, fn());
         });
     });
+
+    const valueGetter: ValueGetter<T> = () => Framework.__store.getVariable(componentId, name).value;
+    valueGetter.toString = () => name;
+    valueGetter.__subscribe = (fn: (value: T) => void) => {
+        Framework.__store.getVariable(componentId, name).listeners.add(() => fn(valueGetter()));
+    }
+
+    return valueGetter;
 }
 
-export function useEffect(fn: () => void, dependencies: string[]) {
+type Teardown = () => void;
+
+export function useEffect(fn: () => Teardown | void, dependencies: ValueGetter<string>[]) {
     const componentId = Framework.__currentContext.componentId;
 
+    const teardown = fn();
+    const teardownId = getId();
+
+    if (teardown) {
+        Framework.__store.setTeardown(componentId, teardownId, teardown);
+    }
+
     dependencies.forEach(dependency => {
-        Framework.__store.getVariable(componentId, dependency).listeners.add(() => {
-            fn();
+        Framework.__store.getVariable(componentId, dependency.toString()).listeners.add(() => {
+            const teardown = Framework.__store.getTeardown(componentId, teardownId);
+            if (teardown) {
+                teardown();
+            }
+
+            const newTeardown = fn();
+            if (newTeardown) {
+                Framework.__store.setTeardown(componentId, teardownId, newTeardown);
+            }
         });
     });
+
 }
 
 export function useGlobalValue<T>(name: string, initialValue?: T): [() => T, (setter: T | ((oldValue: T) => T)) => void] {
@@ -446,8 +569,60 @@ export function subscribeToGlobalValue<T>(name: string, fn: (value: T) => void) 
     value.listeners.add(() => fn(value.value));
 }
 
-export function component(name: string, componentFn: () => string) {
+export function component(componentFn: () => string) {
     const id = getId();
     Framework.addComponent(id, componentFn);
     return id;
+}
+
+function renderDummy(html: string, context: Context): Element {
+    const savedContext = Framework.__currentContext;
+
+    const dummy = document.createElement('div');
+    const dummyChild = document.createElement('div');
+    dummy.appendChild(dummyChild);
+
+    Framework.render(dummyChild, () => `<div class="dummy">${html}</div>`, context);
+
+    Framework.__currentContext = savedContext;
+
+    return dummy.firstElementChild!;
+}
+
+function derender(elements: Element) {
+    const components = elements.querySelectorAll('[component-id]');
+    components.forEach(component => {
+        console.log('Destroying component', component.getAttribute('component-id')!);
+        Framework.__store.deleteRenderContext(component.getAttribute('component-id')!);
+    });
+}
+
+export function list<T>(items: ValueGetter<T[]>, fn: (item: T) => string) {
+    const listSlotName = `list-slot-${getId()}`;
+    const listSlot = `<list-slot name="${listSlotName}"></list-slot>`;
+
+    const componentId = Framework.__currentContext.componentId;
+
+    items.__subscribe((items) => {
+        const slot = document.querySelector(`[name="${listSlotName}"]`);
+        if (slot) {
+            const context = Framework.__store.getRenderContext(componentId);
+
+            const rerendered = items.map(fn).join('');
+
+            const dummy = renderDummy(rerendered, context);
+
+            const parent = slot.parentElement!;
+
+            derender(parent);
+            parent.innerHTML = '';
+
+            parent.appendChild(slot);
+
+            const dummyChildren = [...dummy.children];
+            dummyChildren.forEach(c => parent.appendChild(c));
+        }
+    });
+
+    return listSlot + items().map(fn).join('');
 }
